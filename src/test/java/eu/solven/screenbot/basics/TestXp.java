@@ -1,5 +1,6 @@
 package eu.solven.screenbot.basics;
 
+import java.awt.AWTException;
 import java.awt.image.BufferedImage;
 import java.io.IOException;
 
@@ -16,8 +17,8 @@ import eu.solven.screenbot.VampireSurvivorExpertise;
 public class TestXp {
 
 	@BeforeEach
-	public void reset() {
-		RunScreenBot_VampireSurvivors.reset();
+	public void reset() throws AWTException {
+		new RunScreenBot_VampireSurvivors().reset();
 	}
 
 	@Test

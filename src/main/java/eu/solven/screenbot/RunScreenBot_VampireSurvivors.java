@@ -1,12 +1,15 @@
 package eu.solven.screenbot;
 
-import java.awt.Graphics2D;
-import java.awt.Image;
+import java.awt.AWTException;
 import java.awt.Rectangle;
 import java.awt.Robot;
 import java.awt.Toolkit;
+import java.awt.event.ActionEvent;
+import java.awt.event.ActionListener;
 import java.awt.event.KeyEvent;
 import java.awt.event.KeyListener;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
 import java.awt.image.BufferedImage;
 import java.io.File;
 import java.io.IOException;
@@ -18,14 +21,23 @@ import java.util.List;
 import java.util.Map.Entry;
 import java.util.Optional;
 import java.util.Random;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.IntStream;
 
 import javax.imageio.ImageIO;
+import javax.swing.BoxLayout;
+import javax.swing.ImageIcon;
+import javax.swing.JButton;
 import javax.swing.JFrame;
+import javax.swing.JLabel;
+import javax.swing.JPanel;
+import javax.swing.JTextField;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -50,68 +62,239 @@ import dev.brachtendorf.jimagehash.hashAlgorithms.PerceptiveHash;
 public class RunScreenBot_VampireSurvivors {
 	private static final Logger LOGGER = LoggerFactory.getLogger(RunScreenBot_VampireSurvivors.class);
 
-	// final static Map<Integer, Set<Integer>> keyToRobotDirections = new HashMap<>();
-
 	// This colors are considered as irrelevant to play the game. They are typically very present when no monster is
 	// present in the screen.
 	// final public static Set<Integer> neutralColors = new HashSet<>();
-	final public static AtomicDouble neutralDistance = new AtomicDouble();
-	final public static AtomicLongMap<Hash> neutralHashes = AtomicLongMap.create();
+	final public AtomicDouble neutralDistance = new AtomicDouble();
+	final public AtomicLongMap<Hash> neutralHashes = AtomicLongMap.create();
 
-	// static {
-	// keyToRobotDirections.put(KeyEvent.VK_UP, Set.of(7, 8, 9));
-	// keyToRobotDirections.put(KeyEvent.VK_DOWN, Set.of(1, 2, 3));
-	// keyToRobotDirections.put(KeyEvent.VK_LEFT, Set.of(1, 4, 7));
-	// keyToRobotDirections.put(KeyEvent.VK_RIGHT, Set.of(3, 6, 9));
-	// }
-
-	public static void reset() {
+	public void reset() {
 		VampireSurvivorExpertise.maxXpRatio.set(0);
 		// neutralColors.clear();
 		neutralHashes.clear();
 	}
 
+	final JPanel panel = new JPanel();
+
+	final JTextField robotStatus = new JTextField();
+
+	final Robot robot;
+
+	public final AtomicInteger widthBeforeCrop = new AtomicInteger(0);
+	public final AtomicInteger heightBeforeCrop = new AtomicInteger(0);
+	final ImageIcon recordedAndEnriched = new ImageIcon();
+
+	// BufferedImage consider (0,0) as upper-left, X as width and Y as height
+	public final AtomicInteger recordedBottom = new AtomicInteger();
+	public final AtomicInteger recordedLeft = new AtomicInteger();
+	public final AtomicInteger recordedTop = new AtomicInteger();
+	public final AtomicInteger recordedRight = new AtomicInteger();
+
+	// bit-1 is left
+	// bit-2 bit is up
+	// bit-4 bit is right
+	// bit-8 bit is bottom
+	final AtomicInteger directionFromHuman = new AtomicInteger(5);
+	// 5 is no-op
+	// 4 is left
+	// 8 is up
+	// 6 is right
+	// 2 is bottom
+	final AtomicInteger directionFromRobot = new AtomicInteger(5);
+
+	public RunScreenBot_VampireSurvivors() throws AWTException {
+		this.robot = new Robot();
+	}
+
 	public static void main(String[] args) throws Exception {
+
+		RunScreenBot_VampireSurvivors robot = new RunScreenBot_VampireSurvivors();
+
 		JFrame f = new JFrame();
+
 		f.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
 		f.setVisible(true);
-		f.setSize(0, 0);
+		f.setSize(500, 800);
 
-		AtomicInteger directionFromHuman = new AtomicInteger(5);
+		// https://stackoverflow.com/questions/1626735/how-can-i-display-a-bufferedimage-in-a-jframe
+		// f.getContentPane().setLayout(new FlowLayout());
 
-		trackHumanActions(f, directionFromHuman);
+		// https://stackoverflow.com/questions/11357720/java-vertical-alignment-within-jpanel
+		// robot.panel.setLayout(new GridBagLayout());
+		// GridBagConstraints gbc = new GridBagConstraints();
+		robot.panel.setLayout(new BoxLayout(robot.panel, BoxLayout.Y_AXIS));
 
-		Robot robot = new Robot();
+		// https://stackoverflow.com/questions/31245320/how-to-add-a-button-to-a-jframe-gui
+		f.add(robot.panel);
 
-		AtomicInteger directionFromRobot = new AtomicInteger(5);
+		{
+			robot.robotStatus.setEditable(false);
+			robot.panel.add(robot.robotStatus);
+		}
 
-		initNeutralColors();
+		// We assume not full-screen, as the robot console will be visible
+		CountDownLatch cdlRecordGamePosition = new CountDownLatch(1);
+
+		{
+			JLabel imageHolder = new JLabel(robot.recordedAndEnriched);
+			imageHolder.setSize(400, 300);
+			robot.panel.add(imageHolder//
+			);
+
+			AtomicReference<MouseEvent> startDrag = new AtomicReference<>();
+
+			imageHolder.addMouseListener(new MouseAdapter() {
+
+				@Override
+				public void mousePressed(MouseEvent e) {
+					startDrag.set(e);
+				}
+
+				@Override
+				public void mouseReleased(MouseEvent end) {
+					MouseEvent start = startDrag.getAndSet(null);
+					if (start == null) {
+						return;
+					}
+
+					int height = robot.heightBeforeCrop.get();
+
+					int imgTop = Math.min(start.getY(), end.getY());
+					int newTop = height * imgTop / robot.recordedAndEnriched.getIconHeight();
+					robot.recordedTop.set(newTop);
+
+					int imgBottom = Math.max(start.getY(), end.getY());
+					int newBottom = height * imgBottom / robot.recordedAndEnriched.getIconHeight();
+					robot.recordedBottom.set(newBottom);
+
+					if (newTop == newBottom) {
+						LOGGER.warn("new height is 0");
+						return;
+					}
+
+					int width = robot.widthBeforeCrop.get();
+					int imgLeft = Math.min(start.getX(), end.getX());
+					int newLeft = width * imgLeft / robot.recordedAndEnriched.getIconWidth();
+					robot.recordedLeft.set(newLeft);
+
+					int imgRight = Math.max(start.getX(), end.getX());
+					int newRight = width * imgRight / robot.recordedAndEnriched.getIconWidth();
+					robot.recordedRight.set(newRight);
+
+					if (newLeft == newRight) {
+						LOGGER.warn("new width is 0");
+						return;
+					}
+
+					robot.captureNowThenCropThenShow();
+					cdlRecordGamePosition.countDown();
+				}
+			});
+
+		}
+		// f.pack();
+
+		{
+			// By default, we are fullscreen
+			resetCrop(robot);
+		}
+
+		{
+			AtomicInteger nbTry = new AtomicInteger();
+			JButton resetGameLocation = new JButton();
+			robot.panel.add(resetGameLocation
+			// , gbc
+			);
+			resetGameLocation.setText("Reset Game Location");
+			resetGameLocation.addActionListener(new ActionListener() {
+				public void actionPerformed(ActionEvent e) {
+					BufferedImage capture = robot.captureNowThenCropThenShow();
+
+					boolean updated = updateGameLocation(robot, nbTry, capture);
+					if (updated) {
+						cdlRecordGamePosition.countDown();
+					}
+					robot.cropThenShow(capture);
+				}
+
+			});
+		}
+
+		{
+			JButton saveCrop = new JButton();
+			robot.panel.add(saveCrop
+			// , gbc
+			);
+			saveCrop.setText("Save cropped now!");
+			saveCrop.addActionListener(new ActionListener() {
+				public void actionPerformed(ActionEvent e) {
+					BufferedImage capture = robot.captureNowThenCropThenShow();
+
+					robot.doSaveCapture(capture);
+				}
+			});
+		}
+
+		{
+			JButton zoomOut = new JButton();
+			robot.panel.add(zoomOut
+			// , gbc
+			);
+			zoomOut.setText("Reset Crop");
+			zoomOut.addActionListener(new ActionListener() {
+				public void actionPerformed(ActionEvent e) {
+					resetCrop(robot);
+				}
+			});
+		}
+
+		AtomicBoolean doPlay = new AtomicBoolean();
+		{
+			JButton doPlayButton = new JButton();
+			robot.panel.add(doPlayButton);
+			doPlayButton.setText("Start playing!");
+			doPlayButton.addActionListener(new ActionListener() {
+				public void actionPerformed(ActionEvent e) {
+					if (doPlay.compareAndSet(false, true)) {
+						doPlayButton.setText("Start playing!");
+					} else {
+						doPlayButton.setText("Stop playing!!!");
+					}
+				}
+			});
+		}
+
+		AtomicInteger frameIndex = new AtomicInteger();
+		final JTextField frameStatus = new JTextField();
+		{
+			frameStatus.setEditable(false);
+			robot.panel.add(frameStatus);
+		}
+
+		// Save screenshot before waiting
+		{
+			boolean doSaveCapture = true;
+
+			Executors.newSingleThreadScheduledExecutor().scheduleWithFixedDelay(() -> {
+				try {
+					BufferedImage capture = robot.captureNowThenCropThenShow();
+					if (doSaveCapture) {
+						robot.doSaveCapture(capture);
+					}
+				} catch (Throwable t) {
+					LOGGER.error("ARG", t);
+				}
+			}, 1, 5000, TimeUnit.MILLISECONDS);
+		}
+
+		robot.robotStatus.setText("Please reset the game location!");
+		cdlRecordGamePosition.await();
+
+		// trackHumanActions(f, robot.directionFromHuman);
+
+		robot.initNeutralColors();
 
 		AtomicInteger previousXp = new AtomicInteger();
-
-		boolean doPlay = true;
-		boolean doSaveCapture = true;
-
-		Executors.newSingleThreadScheduledExecutor().scheduleWithFixedDelay(() -> {
-			try {
-				BufferedImage capture =
-						robot.createScreenCapture(new Rectangle(Toolkit.getDefaultToolkit().getScreenSize()));
-
-				capture = RobotWithEye.resize(capture, 640, 480);
-
-				int percentXp = VampireSurvivorExpertise.computeXp(capture);
-				if (previousXp.get() != percentXp) {
-					previousXp.set(percentXp);
-					LOGGER.info("New XP: {}", percentXp);
-				}
-
-				if (doSaveCapture) {
-					doSaveCapture(directionFromHuman, directionFromRobot, capture);
-				}
-			} catch (Throwable t) {
-				LOGGER.error("ARG", t);
-			}
-		}, 1, 5000, TimeUnit.MILLISECONDS);
 
 		AtomicLong previousMenuPercent = new AtomicLong();
 
@@ -121,12 +304,11 @@ public class RunScreenBot_VampireSurvivors {
 		// }, 2, 2, TimeUnit.SECONDS);
 
 		Executors.newSingleThreadScheduledExecutor().scheduleWithFixedDelay(() -> {
+			int frameNowIndex = frameIndex.incrementAndGet();
+			frameStatus.setText("#" + frameNowIndex);
+
 			try {
-
-				BufferedImage capture =
-						robot.createScreenCapture(new Rectangle(Toolkit.getDefaultToolkit().getScreenSize()));
-
-				capture = RobotWithEye.resize(capture, 640, 480);
+				BufferedImage capture = robot.captureNowThenCropThenShow();
 
 				if (VampireSurvivorExpertise.isOtherApp(capture)) {
 					return;
@@ -143,17 +325,28 @@ public class RunScreenBot_VampireSurvivors {
 					return;
 				}
 
-				int directionFromScreenshot = computeDirectionFromRobot(capture);
-				if (directionFromRobot.get() != directionFromScreenshot) {
-					LOGGER.info("Capture suggests we should go to {}", directionFromRobot);
+				int percentXp = VampireSurvivorExpertise.computeXp(capture);
+				if (previousXp.get() != percentXp) {
+					previousXp.set(percentXp);
+					LOGGER.info("New XP: {}", percentXp);
+				}
 
-					if (doPlay) {
-						directionFromRobot.set(directionFromScreenshot);
+				int directionFromScreenshot = robot.computeDirectionFromRobot(capture);
+				if (robot.directionFromRobot.get() != directionFromScreenshot) {
+					LOGGER.info("Capture suggests we should go to {}", robot.directionFromRobot);
+					robot.robotStatus.setText("I would go: " + robot.directionFromRobot);
+
+					if (doPlay.get()) {
+						RobotWithMoves.executeChangeOfDirection(robot.robot,
+								robot.directionFromRobot,
+								directionFromScreenshot);
+					} else {
+						robot.directionFromRobot.set(directionFromScreenshot);
 					}
 				}
 
 				if (false) {
-					doSaveCapture(directionFromHuman, directionFromRobot, capture);
+					robot.doSaveCapture(capture);
 				}
 			} catch (Throwable t) {
 				LOGGER.error("ARG", t);
@@ -161,9 +354,92 @@ public class RunScreenBot_VampireSurvivors {
 		}, 1, 1, TimeUnit.MILLISECONDS);
 	}
 
-	private static void doSaveCapture(AtomicInteger directionFromHuman,
-			AtomicInteger directionFromRobot,
+	public static void resetCrop(RunScreenBot_VampireSurvivors robot) {
+		BufferedImage capture = robot.captureNow();
+
+		robot.recordedTop.set(0);
+		robot.recordedLeft.set(0);
+		robot.recordedBottom.set(capture.getHeight());
+		robot.recordedRight.set(capture.getWidth());
+
+		robot.cropThenShow(capture);
+	}
+
+	@Deprecated(since = "It is doomed to try detecting the window automatically")
+	public static boolean updateGameLocation(RunScreenBot_VampireSurvivors robot,
+			AtomicInteger nbTry,
 			BufferedImage capture) {
+		boolean updated = false;
+
+		int top = VampireSurvivorExpertise.gameTop(capture);
+		int left = VampireSurvivorExpertise.gameLeft(capture);
+		int bottom = VampireSurvivorExpertise.gameBottom(capture);
+		int right = VampireSurvivorExpertise.gameRight(capture);
+
+		if (top >= bottom) {
+			LOGGER.warn("We reject top={} >= bottom={}", top, bottom);
+			robot.robotStatus.setText("Retry reset the game location! (" + nbTry.getAndIncrement() + ")");
+		} else if (left >= right) {
+			LOGGER.warn("We reject left={} >= right={}", left, right);
+			robot.robotStatus.setText("Retry reset the game location! (" + nbTry.getAndIncrement() + ")");
+		} else {
+			saveLogIfDifferent(robot.recordedTop, top, "gameTop");
+			saveLogIfDifferent(robot.recordedLeft, left, "gameLeft");
+			saveLogIfDifferent(robot.recordedBottom, bottom, "gameBottom");
+			saveLogIfDifferent(robot.recordedRight, right, "gameRight");
+
+			updated = true;
+		}
+		return updated;
+	}
+
+	public static void saveLogIfDifferent(AtomicInteger currentValue, int newValue, String message) {
+		if (currentValue.get() != newValue) {
+			LOGGER.info("{} changed from {} to {}", "bottom", currentValue, newValue);
+			currentValue.set(newValue);
+		}
+	}
+
+	public static void saveLogIfDifferent(AtomicLong currentValue, long newValue, String message) {
+		if (currentValue.get() != newValue) {
+			LOGGER.info("{} changed from {} to {}", "bottom", currentValue, newValue);
+			currentValue.set(newValue);
+		}
+	}
+
+	public BufferedImage captureNow() {
+		BufferedImage capture = robot.createScreenCapture(new Rectangle(Toolkit.getDefaultToolkit().getScreenSize()));
+
+		return capture;
+	}
+
+	public BufferedImage cropThenShow(BufferedImage capture) {
+		BufferedImage crop = capture.getSubimage(recordedLeft.get(),
+				recordedTop.get(),
+				recordedRight.get() - recordedLeft.get(),
+				recordedBottom.get() - recordedTop.get());
+
+		widthBeforeCrop.set(capture.getWidth());
+		heightBeforeCrop.set(capture.getHeight());
+		crop = RobotWithEye.resize(crop, 640, 480);
+
+		recordedAndEnriched.setImage(crop);
+
+		panel.invalidate();
+		// Use this ONLY if invalidate doesn't work...
+		panel.revalidate();
+		panel.repaint();
+
+		return crop;
+	}
+
+	public BufferedImage captureNowThenCropThenShow() {
+		BufferedImage capture = captureNow();
+
+		return cropThenShow(capture);
+	}
+
+	public void doSaveCapture(BufferedImage capture) {
 		boolean otherApp = VampireSurvivorExpertise.isOtherApp(capture);
 		boolean menu = VampireSurvivorExpertise.isMenu(capture);
 		boolean suffering = VampireSurvivorExpertise.isSuffering(capture);
@@ -192,126 +468,102 @@ public class RunScreenBot_VampireSurvivors {
 		}
 	}
 
-	public static void initNeutralColors() {
+	public void initNeutralColors() {
 		try {
 			String r = "/go2/easy-monsters=2.png";
 			BufferedImage capture = ImageIO.read(new ClassPathResource(r).getURL());
 
-			// AtomicLongMap<Integer> sampleToCount = RobotWithEye.groupByColor(capture);
-			// long nbPixels = capture.getWidth() * capture.getHeight();
-			// while (true) {
-			// Optional<Entry<Integer, Long>> mostPresent =
-			// sampleToCount.asMap().entrySet().stream().max(Comparator.comparing(e -> e.getValue()));
-			//
-			// if (mostPresent.isPresent() && mostPresent.get().getValue() > nbPixels * 0.1D) {
-			// int rgb = mostPresent.get().getKey();
-			// if (neutralColors.add(rgb)) {
-			// LOGGER.info("We registered {} as irrelevant ({})", HumanTranscoding.toHex(rgb), r);
-			// }
-			//
-			// sampleToCount.remove(rgb);
-			// } else {
-			// break;
-			// }
-			// }
+			HashingAlgorithm hasher = new PerceptiveHash(32);
 
-			{
-				HashingAlgorithm hasher = new PerceptiveHash(32);
+			// We consider our eye has a 10_000 pixel resolution
+			// The strategy is then to detect what's considered background/neutral pixels/blocks
+			int blockWidth = RobotWithEye.getBlockWidth(capture);
+			int blockHeight = RobotWithEye.getBLockHeight(capture);
 
-				// We consider our eye has a 10_000 pixel resolution
-				// The strategy is then to detect what's considered background/neutral pixels/blocks
-				int blockWidth = RobotWithEye.getBlockWidth(capture);
-				int blockHeight = RobotWithEye.getBLockHeight(capture);
+			double limitDistance = 0.5D;
+			// We start considering equivalent hashes are exact-match
+			double minLimitDistance = 0D;
+			double maxLimitDistance = 1D;
 
-				double limitDistance = 0.5D;
-				// We start considering equivalent hashes are exact-match
-				double minLimitDistance = 0D;
-				double maxLimitDistance = 1D;
+			int[] iArray =
+					IntStream.iterate(blockWidth, i -> i < capture.getWidth() - blockWidth, i -> i + blockWidth / 2)
+							.toArray();
+			int[] jArray =
+					IntStream.iterate(blockHeight, j -> j < capture.getHeight() - blockHeight, j -> j + blockHeight / 2)
+							.toArray();
 
-				int[] iArray =
-						IntStream.iterate(blockWidth, i -> i < capture.getWidth() - blockWidth, i -> i + blockWidth / 2)
-								.toArray();
-				int[] jArray = IntStream
-						.iterate(blockHeight, j -> j < capture.getHeight() - blockHeight, j -> j + blockHeight / 2)
-						.toArray();
+			// We iterate randomly in order to pick a random first-hash (else, our first hash may always be the
+			// top-left corner which is biaised)
+			Random random = new Random(123);
+			Statistics.shuffleArray(random, iArray);
+			Statistics.shuffleArray(random, jArray);
 
-				// We iterate randomly in order to pick a random first-hash (else, our first hash may always be the
-				// top-left corner which is biaised)
-				Random random = new Random(123);
-				Statistics.shuffleArray(random, iArray);
-				Statistics.shuffleArray(random, jArray);
+			AtomicLongMap<Hash> localNeutralHashes = AtomicLongMap.create();
+			while (true) {
+				// We divide increment by 2 in order to have overlapping blocks
+				for (int j : jArray) {
+					for (int i : iArray) {
+						BufferedImage block = capture.getSubimage(i, j, blockWidth, blockHeight);
+						Hash currentBlockHash = hasher.hash(block);
 
-				AtomicLongMap<Hash> localNeutralHashes = AtomicLongMap.create();
-				while (true) {
-					// We divide increment by 2 in order to have overlapping blocks
-					for (int j : jArray) {
-						for (int i : iArray) {
-							BufferedImage block = capture.getSubimage(i, j, blockWidth, blockHeight);
-							Hash currentBlockHash = hasher.hash(block);
+						Optional<Entry<Hash, Long>> minimizingHash = localNeutralHashes.asMap()
+								.entrySet()
+								.stream()
+								.min(Comparator.comparing(h -> h.getKey().normalizedHammingDistance(currentBlockHash)));
 
-							Optional<Entry<Hash, Long>> minimizingHash = localNeutralHashes.asMap()
-									.entrySet()
-									.stream()
-									.min(Comparator
-											.comparing(h -> h.getKey().normalizedHammingDistance(currentBlockHash)));
-
-							if (minimizingHash.isPresent() && minimizingHash.get()
-									.getKey()
-									.normalizedHammingDistance(currentBlockHash) < limitDistance) {
-								// We give strength to this already similar block
-								localNeutralHashes.incrementAndGet(minimizingHash.get().getKey());
-							} else {
-								LOGGER.debug("We added a neutral hash for {} {}", i, j);
-								localNeutralHashes.incrementAndGet(currentBlockHash);
-							}
+						if (minimizingHash.isPresent() && minimizingHash.get()
+								.getKey()
+								.normalizedHammingDistance(currentBlockHash) < limitDistance) {
+							// We give strength to this already similar block
+							localNeutralHashes.incrementAndGet(minimizingHash.get().getKey());
+						} else {
+							LOGGER.debug("We added a neutral hash for {} {}", i, j);
+							localNeutralHashes.incrementAndGet(currentBlockHash);
 						}
 					}
-
-					long sum = iArray.length * jArray.length;
-					AtomicLongMap<Hash> localNeutralTopHashes = AtomicLongMap.create();
-					localNeutralHashes.asMap()
-							.entrySet()
-							.stream()
-							.sorted(Comparator.comparing(e -> e.getValue()))
-							.forEach(e -> {
-								// We accept neutral hashes until 2/3rd our sight is considered neutral
-								if (localNeutralTopHashes.sum() < 0.66D * sum) {
-									localNeutralTopHashes.addAndGet(e.getKey(), e.getValue());
-								} else {
-									LOGGER.info("We spotted when covering {}%",
-											((int) localNeutralTopHashes.sum() * 100 / sum));
-								}
-							});
-
-					if (localNeutralTopHashes.size() >= sum * 0.01D) {
-						// We have too many different hashes: let's consider has can be slightly more similar the one to
-						// the others
-						limitDistance += (maxLimitDistance - limitDistance) / 3D;
-						LOGGER.info("We retry with limitDistance={}", limitDistance);
-					} else if (localNeutralTopHashes.size() < sum * 0.01D * 0.001D) {
-						// We have too few different hashes: let's consider has can be slightly less similar the one to
-						// the others
-						limitDistance -= (limitDistance - minLimitDistance) / 3D;
-						LOGGER.info("We retry with limitDistance={}", limitDistance);
-					} else {
-						// We have a good balance between block-similarity and number of pixels considered neutral
-						neutralHashes.putAll(localNeutralTopHashes.asMap());
-						neutralDistance.set(limitDistance);
-						break;
-					}
-
-					// We consider this image is absolute neutral
-					// break;
 				}
-				LOGGER.info("We consider {} neutral hashes", neutralHashes.size());
+
+				long sum = iArray.length * jArray.length;
+				AtomicLongMap<Hash> localNeutralTopHashes = AtomicLongMap.create();
+				localNeutralHashes.asMap()
+						.entrySet()
+						.stream()
+						.sorted(Comparator.comparing(e -> e.getValue()))
+						.forEach(e -> {
+							// We accept neutral hashes until 2/3rd our sight is considered neutral
+							if (localNeutralTopHashes.sum() < 0.66D * sum) {
+								localNeutralTopHashes.addAndGet(e.getKey(), e.getValue());
+							} else {
+								LOGGER.info("We stopped neutral hashed detection when covering {}%",
+										((int) localNeutralTopHashes.sum() * 100 / sum));
+							}
+						});
+
+				if (localNeutralTopHashes.size() >= sum * 0.01D) {
+					// We have too many different hashes: let's consider has can be slightly more similar the one to
+					// the others
+					limitDistance += (maxLimitDistance - limitDistance) / 3D;
+					LOGGER.info("We retry with limitDistance={}", limitDistance);
+				} else if (localNeutralTopHashes.size() < sum * 0.01D * 0.001D) {
+					// We have too few different hashes: let's consider has can be slightly less similar the one to
+					// the others
+					limitDistance -= (limitDistance - minLimitDistance) / 3D;
+					LOGGER.info("We retry with limitDistance={}", limitDistance);
+				} else {
+					// We have a good balance between block-similarity and number of pixels considered neutral
+					neutralHashes.putAll(localNeutralTopHashes.asMap());
+					neutralDistance.set(limitDistance);
+					break;
+				}
 			}
+			LOGGER.info("We consider {} neutral hashes", neutralHashes.size());
 
 		} catch (IOException e) {
 			throw new UncheckedIOException(e);
 		}
 	}
 
-	public static int computeDirectionFromRobot(BufferedImage capture) {
+	public int computeDirectionFromRobot(BufferedImage capture) {
 		int widthCenter = capture.getWidth() / 2;
 		int heightCenter = capture.getHeight() / 2;
 
@@ -398,60 +650,11 @@ public class RunScreenBot_VampireSurvivors {
 		return 5;
 	}
 
-	private static void updateRobotDirection(BufferedImage screenShot, AtomicInteger directionFromRobot) {
+	private void updateRobotDirection(BufferedImage screenShot, AtomicInteger directionFromRobot) {
 		int directionFromScreenshot = computeDirectionFromRobot(screenShot);
 		if (directionFromRobot.get() != directionFromScreenshot) {
 			LOGGER.info("Capture suggests we should go to {}", directionFromRobot);
 			directionFromRobot.set(directionFromScreenshot);
 		}
-	}
-
-	private static void trackHumanActions(JFrame f, AtomicInteger directionFromHuman) {
-		f.addKeyListener(new KeyListener() {
-			@Override
-			public void keyTyped(KeyEvent e) {
-			}
-
-			@Override
-			public void keyPressed(KeyEvent e) {
-				// This assume QUERTY layout
-				if (e.getKeyCode() == KeyEvent.VK_LEFT || e.getKeyCode() == KeyEvent.VK_A) {
-					LOGGER.info("Human press {}", "left");
-					directionFromHuman.set(directionFromHuman.get() | 1);
-				} else if (e.getKeyCode() == KeyEvent.VK_UP || e.getKeyCode() == KeyEvent.VK_W) {
-					LOGGER.info("Human press {}", "up");
-					directionFromHuman.set(directionFromHuman.get() | 2);
-				} else if (e.getKeyCode() == KeyEvent.VK_RIGHT || e.getKeyCode() == KeyEvent.VK_D) {
-					LOGGER.info("Human press {}", "right");
-					directionFromHuman.set(directionFromHuman.get() | 4);
-				} else if (e.getKeyCode() == KeyEvent.VK_DOWN || e.getKeyCode() == KeyEvent.VK_S) {
-					LOGGER.info("Human press {}", "down");
-					directionFromHuman.set(directionFromHuman.get() | 8);
-				} else {
-					LOGGER.info("Human press code={}, char={}", e.getKeyCode(), e.getKeyChar());
-				}
-			}
-
-			@Override
-			public void keyReleased(KeyEvent e) {
-				// This assume QUERTY layout
-				if (e.getKeyCode() == KeyEvent.VK_LEFT || e.getKeyCode() == KeyEvent.VK_A) {
-					LOGGER.info("Human release {}", "left");
-					// https://stackoverflow.com/questions/3920307/how-can-i-remove-a-flag-in-c
-					directionFromHuman.set(directionFromHuman.get() & ~1);
-				} else if (e.getKeyCode() == KeyEvent.VK_UP || e.getKeyCode() == KeyEvent.VK_W) {
-					LOGGER.info("Human release {}", "up");
-					directionFromHuman.set(directionFromHuman.get() & ~2);
-				} else if (e.getKeyCode() == KeyEvent.VK_RIGHT || e.getKeyCode() == KeyEvent.VK_D) {
-					LOGGER.info("Human release {}", "right");
-					directionFromHuman.set(directionFromHuman.get() & ~4);
-				} else if (e.getKeyCode() == KeyEvent.VK_DOWN || e.getKeyCode() == KeyEvent.VK_S) {
-					LOGGER.info("Human release {}", "down");
-					directionFromHuman.set(directionFromHuman.get() & ~8);
-				} else {
-					LOGGER.info("Human release code={}, char={}", e.getKeyCode(), e.getKeyChar());
-				}
-			}
-		});
 	}
 }

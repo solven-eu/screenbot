@@ -8,6 +8,7 @@ import java.util.Collection;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.google.common.primitives.Ints;
 import com.google.common.util.concurrent.AtomicLongMap;
 
 /**
@@ -125,5 +126,79 @@ public class RobotWithEye {
 		double gSquared = Math.pow((c & 0x00FF00) - (i & 0x00FF00), 2);
 		double bSquared = Math.pow((c & 0xFF0000) - (i & 0xFF0000), 2);
 		return (long) Math.sqrt(rSquared + gSquared + bSquared);
+	}
+
+	public static int top(BufferedImage capture, int... colors) {
+		int[] pixel = new int[3];
+
+		// Search from the top
+		for (int j = 0; j < capture.getHeight(); j++) {
+			for (int i = 0; i < capture.getWidth(); i++) {
+				pixel = capture.getRaster().getPixel(i, j, pixel);
+				int rgb = pixel[0] << 16 | pixel[1] << 8 | pixel[2];
+
+				if (Ints.contains(colors, rgb)) {
+					return j;
+				}
+			}
+		}
+
+		return capture.getHeight();
+	}
+
+	public static int bottom(BufferedImage capture, int... colors) {
+		int[] pixel = new int[3];
+
+		// Search from the bottom
+		for (int j = 0; j < capture.getHeight(); j++) {
+			int jj = capture.getHeight() - j - 1;
+			for (int i = 0; i < capture.getWidth(); i++) {
+				pixel = capture.getRaster().getPixel(i, jj, pixel);
+				int rgb = pixel[0] << 16 | pixel[1] << 8 | pixel[2];
+
+				if (Ints.contains(colors, rgb)) {
+					return jj;
+				}
+			}
+		}
+
+		return 0;
+	}
+
+	public static int left(BufferedImage capture, int... colors) {
+		int[] pixel = new int[3];
+
+		// Search from the left
+		for (int i = 0; i < capture.getWidth(); i++) {
+			for (int j = 0; j < capture.getHeight(); j++) {
+				pixel = capture.getRaster().getPixel(i, j, pixel);
+				int rgb = pixel[0] << 16 | pixel[1] << 8 | pixel[2];
+
+				if (Ints.contains(colors, rgb)) {
+					return j;
+				}
+			}
+		}
+
+		return capture.getWidth();
+	}
+
+	public static int right(BufferedImage capture, int... colors) {
+		int[] pixel = new int[3];
+
+		// Search from the right
+		for (int i = 0; i < capture.getWidth(); i++) {
+			int ii = capture.getWidth() - i - 1;
+			for (int j = 0; j < capture.getHeight(); j++) {
+				pixel = capture.getRaster().getPixel(ii, j, pixel);
+				int rgb = pixel[0] << 16 | pixel[1] << 8 | pixel[2];
+
+				if (Ints.contains(colors, rgb)) {
+					return ii;
+				}
+			}
+		}
+
+		return 0;
 	}
 }
